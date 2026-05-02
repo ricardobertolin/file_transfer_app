@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 192 192">
+  <rect width="192" height="192" rx="32" fill="#06b6d4"/>
+  <g fill="none" stroke="#ffffff" stroke-width="10" stroke-linecap="round" stroke-linejoin="round">
+    <!-- file icon (left) -->
+    <path d="M40 48 h44 l16 16 v68 a8 8 0 0 1 -8 8 H40 a8 8 0 0 1 -8 -8 V56 a8 8 0 0 1 8 -8 z"/>
+    <path d="M84 48 v16 a4 4 0 0 0 4 4 h12"/>
+    <!-- arrow beam (right, going off the file) -->
+    <line x1="108" y1="96" x2="160" y2="96"/>
+    <polyline points="140,76 160,96 140,116"/>
+  </g>
+</svg>

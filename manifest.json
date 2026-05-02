@@ -1,0 +1,19 @@
+{
+  "name": "FileBeam — P2P File Transfer",
+  "short_name": "FileBeam",
+  "description": "Peer-to-peer file transfer PWA with lobby codes, password gating, and optional gzip compression.",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#0a1929",
+  "theme_color": "#06b6d4",
+  "orientation": "portrait-primary",
+  "lang": "en",
+  "icons": [
+    {
+      "src": "icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
