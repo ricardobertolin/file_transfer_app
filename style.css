@@ -427,6 +427,26 @@ body {
 
 .recv-item__actions { justify-content: flex-end; gap: 8px; }
 
+.recv-item__downloads {
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  color: var(--color-text-muted);
+}
+
+.share-link {
+  width: 100%;
+  background: var(--color-bg);
+  border: 1.5px solid var(--color-border);
+  border-radius: var(--radius-input);
+  color: var(--color-text);
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  padding: 8px 10px;
+  outline: none;
+  transition: border-color var(--transition);
+}
+.share-link:focus { border-color: var(--color-accent); }
+
 .recv-item__download {
   display: inline-block;
   padding: 6px 14px;

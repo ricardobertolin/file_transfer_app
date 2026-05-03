@@ -4,20 +4,20 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
   <meta name="theme-color" content="#06b6d4">
-  <meta name="description" content="A small peer-to-peer file transfer PWA with lobby codes and password gating.">
+  <meta name="description" content="Drag-and-drop peer-to-peer file sharing — each file gets its own private link.">
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="FileBeam">
 
-  <title>FileBeam · P2P File Transfer</title>
+  <title>FileBeam · Drag-and-Drop P2P File Sharing</title>
 
   <link rel="stylesheet" href="style.css">
   <link rel="manifest" href="manifest.json">
   <link rel="apple-touch-icon" href="icon.svg">
 
   <!-- PeerJS: WebRTC wrapper with a free public broker for signaling.
-       After two peers connect, all file traffic flows peer-to-peer. -->
+       After a connection opens, all file traffic flows directly P2P. -->
   <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"
           crossorigin="anonymous" defer></script>
 </head>
@@ -27,144 +27,79 @@
 
     <header class="header">
       <h1 class="header__title">FileBeam</h1>
-      <p class="header__subtitle">Peer-to-Peer File Transfer</p>
+      <p class="header__subtitle">Drag-and-Drop P2P File Sharing</p>
     </header>
 
     <main class="main">
 
-      <!-- Menu -->
-      <section class="screen" id="screen-menu">
+      <!-- ── Share mode (default) ──────────────────────────── -->
+      <section class="screen" id="screen-share" hidden>
         <div class="card">
-          <p class="card__lead">Pick a role to start.</p>
-          <div class="btn-row">
-            <button class="btn btn--primary" id="btnGoHost">Host a Lobby</button>
-            <button class="btn btn--secondary" id="btnGoJoin">Join a Lobby</button>
-          </div>
-          <p class="status status--neutral" id="menuStatus">Connecting…</p>
-        </div>
-      </section>
+          <p class="status status--neutral" id="shareStatus">Connecting to broker…</p>
 
-      <!-- Host setup -->
-      <section class="screen" id="screen-host" hidden>
-        <div class="card">
-          <h2 class="card__title">Host a Lobby</h2>
-
-          <label class="label" for="hostPassword">
-            Lobby password <span class="label__hint">(required — keeps strangers out)</span>
-          </label>
-          <input type="text"
-                 id="hostPassword"
-                 class="input"
-                 placeholder="e.g. dragon42"
-                 autocomplete="off"
-                 autocorrect="off"
-                 autocapitalize="off"
-                 spellcheck="false"
-                 maxlength="64">
-
-          <div class="btn-row">
-            <button class="btn btn--primary" id="btnCreateLobby">Create Lobby</button>
-            <button class="btn btn--ghost" id="btnHostBack">Back</button>
-          </div>
-
-          <div class="lobby-info" id="hostLobbyInfo" hidden>
-            <p class="label">Lobby code</p>
-            <p class="lobby-code" id="lobbyCode"></p>
-            <p class="field-hint">Share this code <strong>and</strong> the password with the person you invited.</p>
-            <p class="status" id="hostStatus">Waiting for guest to join…</p>
-            <button class="btn btn--ghost" id="btnHostCancel">Cancel Lobby</button>
-          </div>
-        </div>
-      </section>
-
-      <!-- Guest join -->
-      <section class="screen" id="screen-join" hidden>
-        <div class="card">
-          <h2 class="card__title">Join a Lobby</h2>
-
-          <label class="label" for="joinCode">Lobby code</label>
-          <input type="text"
-                 id="joinCode"
-                 class="input input--code"
-                 placeholder="ABC123"
-                 autocomplete="off"
-                 autocorrect="off"
-                 autocapitalize="characters"
-                 spellcheck="false"
-                 maxlength="6">
-
-          <label class="label" for="joinPassword">Password</label>
-          <input type="text"
-                 id="joinPassword"
-                 class="input"
-                 placeholder="ask your host"
-                 autocomplete="off"
-                 autocorrect="off"
-                 autocapitalize="off"
-                 spellcheck="false"
-                 maxlength="64">
-
-          <div class="btn-row">
-            <button class="btn btn--primary" id="btnConnect">Connect</button>
-            <button class="btn btn--ghost" id="btnJoinBack">Back</button>
-          </div>
-
-          <p class="status" id="joinStatus"></p>
-        </div>
-      </section>
-
-      <!-- Transfer -->
-      <section class="screen" id="screen-transfer" hidden>
-        <div class="card">
-          <div class="game-header">
-            <span class="player-tag" id="peerTagYou">You: —</span>
-            <span class="player-tag" id="peerTagOpp">Peer: —</span>
-          </div>
-          <p class="status" id="transferStatus">Connected.</p>
-
-          <!-- Send block -->
-          <p class="label">Send a file</p>
+          <p class="label">Add a file</p>
           <label class="dropzone" id="dropzone" for="filePicker">
             <input type="file" id="filePicker" hidden>
             <span class="dropzone__main">Tap to pick a file <span class="dropzone__sep">or drag &amp; drop here</span></span>
-            <span class="dropzone__hint" id="dropzoneHint">Any file, up to a few hundred MB.</span>
+            <span class="dropzone__hint">Each file gets its own private link.</span>
           </label>
 
-          <div class="file-info" id="sendInfo" hidden>
+          <!-- Staging: shown after a file is dropped, before sharing -->
+          <div class="file-info" id="stageInfo" hidden>
             <div class="file-info__row">
-              <span class="file-info__name" id="sendName">—</span>
-              <span class="file-info__size" id="sendSize">—</span>
+              <span class="file-info__name" id="stageName">—</span>
+              <span class="file-info__size" id="stageSize">—</span>
             </div>
             <div class="file-info__row">
-              <span class="badge" id="sendCompressedBadge">checking…</span>
+              <span class="badge" id="stageBadge">checking…</span>
             </div>
 
-            <label class="toggle" id="compressToggleLabel">
-              <input type="checkbox" id="compressToggle">
+            <label class="toggle">
+              <input type="checkbox" id="stageCompress">
               <span class="toggle__track"><span class="toggle__thumb"></span></span>
-              <span class="toggle__text">Compress with gzip before sending</span>
+              <span class="toggle__text">Compress with gzip before sharing</span>
             </label>
-            <p class="field-hint" id="compressHint">Saves bandwidth for text/raw files. Skip for already-compressed formats.</p>
+            <p class="field-hint" id="stageHint">Detecting…</p>
 
             <div class="btn-row">
-              <button class="btn btn--primary" id="btnSend">Send File</button>
-              <button class="btn btn--ghost" id="btnClearFile">Clear</button>
-            </div>
-
-            <div class="progress" id="sendProgressWrap" hidden>
-              <div class="progress__bar"><div class="progress__fill" id="sendProgressFill"></div></div>
-              <p class="progress__text" id="sendProgressText">0%</p>
+              <button class="btn btn--primary" id="btnStage">Share this file</button>
+              <button class="btn btn--ghost" id="btnStageCancel">Cancel</button>
             </div>
           </div>
 
-          <!-- Receive block -->
-          <p class="label">Incoming files</p>
-          <div class="recv-list" id="recvList">
-            <p class="empty" id="recvEmpty">No files received yet.</p>
+          <p class="label">Shared files</p>
+          <div class="recv-list" id="sharedList">
+            <p class="empty" id="sharedEmpty">No files shared yet.</p>
           </div>
 
           <div class="btn-row">
-            <button class="btn btn--ghost" id="btnLeave">Disconnect</button>
+            <button class="btn btn--ghost" id="btnStopAll">Stop sharing &amp; close room</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- ── Receive mode (URL has #share=…) ───────────────── -->
+      <section class="screen" id="screen-receive" hidden>
+        <div class="card">
+          <h2 class="card__title">Incoming file</h2>
+          <p class="status" id="recvStatus">Connecting…</p>
+
+          <div class="file-info" id="recvInfo" hidden>
+            <div class="file-info__row">
+              <span class="file-info__name" id="recvName">—</span>
+              <span class="file-info__size" id="recvSize">—</span>
+            </div>
+            <div class="file-info__row">
+              <span class="badge" id="recvBadge"></span>
+            </div>
+            <div class="progress">
+              <div class="progress__bar"><div class="progress__fill" id="recvFill"></div></div>
+              <p class="progress__text" id="recvText">0%</p>
+            </div>
+          </div>
+
+          <div class="btn-row" id="recvActions">
+            <button class="btn btn--ghost" id="btnRecvCancel">Cancel</button>
           </div>
         </div>
       </section>
@@ -172,7 +107,7 @@
     </main>
 
     <footer class="footer">
-      <p>v0.1.0 &nbsp;·&nbsp; PeerJS WebRTC</p>
+      <p>v0.2.0 &nbsp;·&nbsp; PeerJS WebRTC</p>
       <p>Made by <span class="footer__author">ricardobertolin</span></p>
     </footer>
 
