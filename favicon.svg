@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="FileBeam">
+  <title>FileBeam</title>
+
+  <!-- Simplified sibling of icon.svg, redrawn on a 64px grid with heavier
+       masses and fewer parts so the mark still reads at 16×16. The
+       parchment plate is kept (rather than a transparent background) so
+       the dark-red ship stays visible against dark browser chrome. -->
+  <rect width="64" height="64" rx="6" fill="#f5ecd9"/>
+
+  <g fill="#8b0000">
+    <!-- Hull -->
+    <path d="M7 41 H57 l-5 9 a6 6 0 0 1 -5 3 H17 a6 6 0 0 1 -5 -3 Z"/>
+
+    <!-- Mast -->
+    <rect x="28" y="9" width="5" height="32" rx="2.5"/>
+
+    <!-- Fore sail (jib) -->
+    <path d="M25 17 V38 H12 Z"/>
+
+    <!-- Main sail as a document page with a cut corner -->
+    <path d="M36 12 H46 L54 20 V38 H36 Z"/>
+  </g>
+
+  <!-- Folded corner, carved out in parchment -->
+  <path d="M46 12 L54 20 H46 Z" fill="#f5ecd9"/>
+  <path d="M46 12 L54 20 H46 Z" fill="none" stroke="#8b0000" stroke-width="2.5"
+        stroke-linejoin="round"/>
+</svg>

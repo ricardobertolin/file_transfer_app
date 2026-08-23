@@ -18,6 +18,9 @@
 
   <link rel="stylesheet" href="style.css">
   <link rel="manifest" href="manifest.json">
+
+  <link rel="icon" type="image/svg+xml" href="favicon.svg">
+  <link rel="mask-icon" href="favicon.svg" color="#8b0000">
   <link rel="apple-touch-icon" href="icon.svg">
 
   <!-- PeerJS: WebRTC wrapper with a free public broker for signaling.
@@ -65,6 +68,11 @@
             </label>
             <p class="field-hint" id="stageHint">Detecting…</p>
 
+            <div class="progress" id="stageProgress" hidden>
+              <div class="progress__bar"><div class="progress__fill" id="stageFill"></div></div>
+              <p class="progress__text" id="stageText">0%</p>
+            </div>
+
             <div class="btn-row">
               <button class="btn btn--primary" id="btnStage">Share this file</button>
               <button class="btn btn--ghost" id="btnStageCancel">Cancel</button>
@@ -79,6 +87,38 @@
           <div class="btn-row">
             <button class="btn btn--ghost" id="btnStopAll">Stop sharing &amp; close room</button>
           </div>
+
+          <!-- ── Network / ICE settings ──────────────────────── -->
+          <details class="netcfg">
+            <summary>Network</summary>
+
+            <p class="status status--neutral" id="netStatus">Testing STUN/TURN reachability…</p>
+
+            <p class="field-hint">
+              WebRTC needs a <strong>TURN</strong> relay to get through symmetric NAT
+              and strict firewalls; STUN alone is not enough. Only STUN is configured
+              by default — no relay ships with the app, because a stale free one fails
+              exactly when it is needed. Fill in the <code>turn:</code> entry below with
+              your own server. Leave the box empty to fall back to the defaults.
+            </p>
+
+            <textarea class="textarea" id="netConfig" spellcheck="false"
+                      aria-label="ICE and broker configuration (JSON)"></textarea>
+
+            <p class="field-hint">
+              Optional keys: <code>forceRelay</code> (boolean — route everything through
+              TURN, handy for testing it) and <code>server</code>
+              (<code>{host, port, path, secure, key}</code> — point at your own
+              peerjs-server instead of the public broker). Saved to this browser only;
+              reload to apply.
+            </p>
+
+            <div class="btn-row">
+              <button class="btn btn--primary" id="btnNetSave">Save</button>
+              <button class="btn btn--secondary" id="btnNetTest">Test connectivity</button>
+              <button class="btn btn--ghost" id="btnNetReset">Reset to defaults</button>
+            </div>
+          </details>
         </div>
       </section>
 
@@ -102,7 +142,12 @@
             </div>
           </div>
 
-          <div class="btn-row" id="recvActions">
+          <p class="path-note" id="recvPath"></p>
+
+          <!-- Destination / download buttons are swapped in here by app.js -->
+          <div class="btn-row" id="recvActions"></div>
+
+          <div class="btn-row">
             <button class="btn btn--ghost" id="btnRecvCancel">Cancel</button>
           </div>
         </div>
@@ -111,7 +156,7 @@
     </main>
 
     <footer class="footer">
-      <p>v0.2.0 &nbsp;·&nbsp; PeerJS WebRTC</p>
+      <p>v0.3.0 &nbsp;·&nbsp; PeerJS WebRTC</p>
       <p>Made by <span class="footer__author">ricardobertolin</span></p>
     </footer>
 

@@ -1,11 +1,11 @@
 {
   "name": "FileBeam — P2P File Transfer",
   "short_name": "FileBeam",
-  "description": "Peer-to-peer file transfer PWA with lobby codes, password gating, and optional gzip compression.",
+  "description": "Drag-and-drop peer-to-peer file transfer. Each file gets its own link, files stream directly between browsers, and links die when the tab closes.",
   "start_url": "./",
   "display": "standalone",
-  "background_color": "#0a1929",
-  "theme_color": "#06b6d4",
+  "background_color": "#f5ecd9",
+  "theme_color": "#f5ecd9",
   "orientation": "portrait-primary",
   "lang": "en",
   "icons": [
@@ -13,7 +13,13 @@
       "src": "icon.svg",
       "sizes": "any",
       "type": "image/svg+xml",
-      "purpose": "any maskable"
+      "purpose": "any"
+    },
+    {
+      "src": "icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "maskable"
     }
   ]
 }

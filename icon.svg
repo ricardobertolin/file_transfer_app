@@ -1,11 +1,28 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 192 192">
-  <rect width="192" height="192" rx="32" fill="#06b6d4"/>
-  <g fill="none" stroke="#ffffff" stroke-width="10" stroke-linecap="round" stroke-linejoin="round">
-    <!-- file icon (left) -->
-    <path d="M40 48 h44 l16 16 v68 a8 8 0 0 1 -8 8 H40 a8 8 0 0 1 -8 -8 V56 a8 8 0 0 1 8 -8 z"/>
-    <path d="M84 48 v16 a4 4 0 0 0 4 4 h12"/>
-    <!-- arrow beam (right, going off the file) -->
-    <line x1="108" y1="96" x2="160" y2="96"/>
-    <polyline points="140,76 160,96 140,116"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 192 192" role="img" aria-label="FileBeam">
+  <title>FileBeam</title>
+
+  <!-- Parchment field. Full-bleed so the icon works as `maskable`; all
+       artwork stays inside r≈76 of centre (96,96) so a circular crop
+       never clips it. Palette matches the theme in style.css. -->
+  <rect width="192" height="192" fill="#f5ecd9"/>
+
+  <g fill="#8b0000">
+    <!-- Hull -->
+    <path d="M30 124 H162 l-13 24 a15 15 0 0 1 -13 8 H56 a15 15 0 0 1 -13 -8 Z"/>
+
+    <!-- Mast -->
+    <rect x="87" y="32" width="10" height="92" rx="5"/>
+
+    <!-- Fore sail (jib) -->
+    <path d="M79 52 V116 H42 Z"/>
+
+    <!-- Main sail, cut as a document page: the notched top-right corner
+         is what makes it read as a *file* rather than canvas. -->
+    <path d="M105 38 H134 L156 60 V116 H105 Z"/>
   </g>
+
+  <!-- Folded corner of the page, carved back out in parchment -->
+  <path d="M134 38 L156 60 H134 Z" fill="#f5ecd9"/>
+  <path d="M134 38 L156 60 H134 Z" fill="none" stroke="#8b0000" stroke-width="6"
+        stroke-linejoin="round"/>
 </svg>

@@ -71,6 +71,9 @@ a { color: var(--link); }
 /* ── Main / screens ─────────────────────────────────────────── */
 .main { display: block; }
 .screen { display: block; }
+/* An author `display` beats the UA's `[hidden] { display:none }`, so the
+   hidden attribute has to be honoured explicitly or both screens render. */
+.screen[hidden] { display: none; }
 
 /* ── Card ───────────────────────────────────────────────────── */
 .card {
@@ -420,6 +423,62 @@ a { color: var(--link); }
   text-align: center;
   font-size: 0.85rem;
   padding: 4px;
+}
+
+/* ── Network settings panel ─────────────────────────────────── */
+.netcfg {
+  margin-top: 14px;
+  border-top: 1px solid var(--border-d);
+  padding-top: 8px;
+}
+
+.netcfg > summary {
+  cursor: pointer;
+  font-family: var(--font-old);
+  font-size: 1.25rem;
+  list-style: none;
+  user-select: none;
+}
+.netcfg > summary::-webkit-details-marker { display: none; }
+.netcfg > summary::before { content: '\00BB\00A0'; color: var(--accent); }
+.netcfg[open] > summary::before { content: '\00AB\00A0'; }
+
+.netcfg code {
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  background: #f0e3c2;
+  border: 1px solid var(--border);
+  padding: 0 3px;
+}
+
+.textarea {
+  display: block;
+  width: 100%;
+  min-height: 150px;
+  margin-top: 6px;
+  background: #fff;
+  border: 1px solid var(--border-d);
+  border-radius: 0;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 0.76rem;
+  line-height: 1.35;
+  padding: 6px;
+  resize: vertical;
+  outline: none;
+  white-space: pre;
+  overflow-wrap: normal;
+  overflow-x: auto;
+}
+.textarea:focus { border-color: var(--accent); }
+
+/* ── Connection path / destination note ─────────────────────── */
+.path-note {
+  font-size: 0.8rem;
+  font-style: italic;
+  color: var(--muted);
+  margin-top: 6px;
+  min-height: 1em;
 }
 
 /* ── Footer ─────────────────────────────────────────────────── */

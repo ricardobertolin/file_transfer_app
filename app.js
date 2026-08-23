@@ -1,5 +1,5 @@
 /* ============================================================
-   FileBeam — Drag-and-Drop P2P File Sharing  v0.2.0
+   FileBeam — Drag-and-Drop P2P File Sharing  v0.3.0
    ============================================================
    Architecture
      • One PeerJS Peer per browser session, created on page load.
@@ -9,16 +9,41 @@
      • Each file the user shares gets a random fileId and lives in
        a Map alongside its (optionally pre-compressed) Blob. The
        share link is:  <location>#share=<peerId>.<fileId>
-     • Receiver flow: open the link → fresh Peer → connect to the
-       sender's peerId → send {type:'request', fileId}. Sender
-       replies with {type:'file-meta'} + ArrayBuffer chunks +
-       {type:'file-end'}. Unknown fileId → {type:'reject',
-       reason:'not-found'}.
-     • Compression: magic-byte + extension detection. If the file
-       isn't already compressed, the gzip toggle defaults ON. The
-       Blob is gzipped at "Share" time using CompressionStream so
-       the wire size on the link is accurate; receiver inflates
-       with DecompressionStream.
+
+   ICE / connectivity
+     • STUN alone cannot traverse symmetric NAT or most corporate
+       firewalls, so a TURN relay is configured by default. The
+       bundled credentials are a free best-effort public service —
+       bring your own for anything you care about (see NETWORK
+       SETTINGS below, or the "Network" panel in the UI).
+     • On boot the sender probes ICE and reports whether a relay
+       candidate could actually be gathered, so a doomed network
+       is visible up front instead of as a mystery failure later.
+
+   Memory / streaming
+     • Nothing is buffered whole in the JS heap. Outgoing files are
+       gzipped through CompressionStream into a disk-backed Blob,
+       and sent by slicing that Blob chunk by chunk.
+     • Incoming files are piped straight through
+       DecompressionStream into a destination WritableStream. On
+       browsers with the File System Access API that destination is
+       the user's chosen file on disk, so transfer size is bounded
+       by disk, not RAM. Elsewhere we fold chunks into a Blob every
+       few MB, which lets the browser spill to disk and keeps the
+       heap flat.
+
+   Wire protocol (v2)
+     receiver → {type:'request', fileId, proto:2}
+     sender   → {type:'file-meta', ...meta}
+     receiver → {type:'start'}                 // proto 2 only
+     sender   → ArrayBuffer chunks…
+     sender   → {type:'file-end', id, size}
+     sender   → {type:'reject', reason}        // not-found | no-request | no-start
+
+     A proto-1 receiver omits `proto`, and the sender streams
+     immediately after the meta rather than waiting for 'start'.
+     A proto-2 receiver tolerates a proto-1 sender by buffering any
+     chunks that arrive before its destination is ready.
    ============================================================ */
 
 'use strict';
@@ -51,12 +76,21 @@ const stageSize       = $('stageSize');
 const stageBadge      = $('stageBadge');
 const stageCompress   = $('stageCompress');
 const stageHint       = $('stageHint');
+const stageProgress   = $('stageProgress');
+const stageFill       = $('stageFill');
+const stageText       = $('stageText');
 const btnStage        = $('btnStage');
 const btnStageCancel  = $('btnStageCancel');
 
 const sharedList      = $('sharedList');
 const sharedEmpty     = $('sharedEmpty');
 const btnStopAll      = $('btnStopAll');
+
+const netStatus       = $('netStatus');
+const netConfig       = $('netConfig');
+const btnNetSave      = $('btnNetSave');
+const btnNetReset     = $('btnNetReset');
+const btnNetTest      = $('btnNetTest');
 
 const recvStatus      = $('recvStatus');
 const recvInfo        = $('recvInfo');
@@ -65,13 +99,18 @@ const recvSize        = $('recvSize');
 const recvBadge       = $('recvBadge');
 const recvFill        = $('recvFill');
 const recvText        = $('recvText');
+const recvPath        = $('recvPath');
 const recvActions     = $('recvActions');
 const btnRecvCancel   = $('btnRecvCancel');
 
 /* Constants */
+const PROTO             = 2;
 const CHUNK_SIZE        = 16 * 1024;       // 16 KB — safe SCTP message size
 const BUFFER_HIGH_WATER = 1 * 1024 * 1024; // 1 MB
 const BUFFER_LOW_WATER  = 256 * 1024;      // 256 KB
+const BLOB_FOLD_BYTES   = 8 * 1024 * 1024; // fold buffered chunks into a Blob every 8 MB
+const PREBUFFER_MAX     = 64 * 1024 * 1024;// cap on chunks held while awaiting a destination
+const START_TIMEOUT_MS  = 5 * 60 * 1000;   // receiver has this long to pick a save location
 
 /* ── Sender state ───────────────────────────────────────────── */
 let peer = null;
@@ -80,6 +119,197 @@ const shared = new Map(); // fileId → { meta, blob, downloads, itemEl, dlCount
 
 let stagedFile = null;
 let stagedDetected = null;
+
+/* ════════════════════════════════════════════════════════════
+   NETWORK SETTINGS  (ICE servers + optional self-hosted broker)
+   ════════════════════════════════════════════════════════════
+   Overridable at runtime via localStorage['filebeam.rtc'] or the
+   "Network" panel on the share screen. Shape:
+
+     {
+       "iceServers": [
+         { "urls": "stun:stun.l.google.com:19302" },
+         { "urls": "turn:turn.example.com:3478",
+           "username": "user", "credential": "pass" }
+       ],
+       "forceRelay": false,
+       "server": { "host": "peer.example.com", "port": 443,
+                   "path": "/", "secure": true, "key": "peerjs" }
+     }
+
+   Every field is optional; omitted fields fall back to the
+   defaults below. `forceRelay` sets iceTransportPolicy:'relay',
+   which is useful for verifying that your TURN server works.
+   `server` points PeerJS at your own peerjs-server instead of the
+   rate-limited public broker at 0.peerjs.com.
+   ════════════════════════════════════════════════════════════ */
+
+const RTC_STORAGE_KEY = 'filebeam.rtc';
+
+/* STUN only by default. These are public binding servers run by Google
+   and Cloudflare, verified reachable — they are enough to discover your
+   public address, which gets a direct connection on most home networks.
+
+   There is deliberately NO default TURN server. A relay costs real
+   bandwidth, so every free public one either dies or rotates its
+   credentials, and a hardcoded dead relay is worse than none: it looks
+   configured while failing exactly when it is needed. Add your own here
+   or through the Network panel — see TURN_EXAMPLE for the shape. */
+const DEFAULT_ICE_SERVERS = [
+  { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] },
+  { urls: 'stun:stun.cloudflare.com:3478' },
+];
+
+/* Shown in the Network panel as a fill-in-the-blanks starting point. */
+const TURN_EXAMPLE = {
+  urls: ['turn:turn.example.com:3478', 'turns:turn.example.com:5349?transport=tcp'],
+  username: 'your-username',
+  credential: 'your-password',
+};
+
+function loadRtcConfig() {
+  let raw = null;
+  try { raw = localStorage.getItem(RTC_STORAGE_KEY); } catch (_) { /* private mode */ }
+  if (!raw) return { iceServers: DEFAULT_ICE_SERVERS };
+
+  try {
+    const parsed = JSON.parse(raw);
+    const cfg = {};
+    cfg.iceServers = Array.isArray(parsed.iceServers) && parsed.iceServers.length
+      ? parsed.iceServers
+      : DEFAULT_ICE_SERVERS;
+    if (parsed.forceRelay) cfg.forceRelay = true;
+    if (parsed.server && typeof parsed.server === 'object') cfg.server = parsed.server;
+    return cfg;
+  } catch (err) {
+    console.warn('[rtc] stored config is not valid JSON — using defaults:', err);
+    return { iceServers: DEFAULT_ICE_SERVERS };
+  }
+}
+
+function saveRtcConfig(text) {
+  const trimmed = (text || '').trim();
+  if (!trimmed) {
+    try { localStorage.removeItem(RTC_STORAGE_KEY); } catch (_) {}
+    return { ok: true, cleared: true };
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch (err) {
+    return { ok: false, error: 'Not valid JSON: ' + err.message };
+  }
+  if (parsed.iceServers && !Array.isArray(parsed.iceServers)) {
+    return { ok: false, error: '"iceServers" must be an array.' };
+  }
+  try {
+    localStorage.setItem(RTC_STORAGE_KEY, JSON.stringify(parsed, null, 2));
+  } catch (err) {
+    return { ok: false, error: 'Could not save: ' + err.message };
+  }
+  return { ok: true };
+}
+
+/* Options handed to `new Peer()`. */
+function peerOptions() {
+  const cfg = loadRtcConfig();
+  const opts = {
+    config: {
+      iceServers: cfg.iceServers,
+      iceCandidatePoolSize: 2,
+      ...(cfg.forceRelay ? { iceTransportPolicy: 'relay' } : {}),
+    },
+  };
+  if (cfg.server) Object.assign(opts, cfg.server);
+  return opts;
+}
+
+/* Gather candidates against the configured servers to find out, before
+   any transfer is attempted, whether a relay is actually reachable. */
+async function probeIce(iceServers, timeoutMs = 8000) {
+  if (typeof RTCPeerConnection === 'undefined') {
+    return { srflx: false, relay: false, error: 'WebRTC unavailable' };
+  }
+  const found = { srflx: false, relay: false };
+  let pc;
+  try {
+    pc = new RTCPeerConnection({ iceServers });
+    pc.createDataChannel('probe');
+
+    const settled = new Promise((resolve) => {
+      let done = false;
+      const finish = () => { if (!done) { done = true; resolve(); } };
+      pc.onicecandidate = (ev) => {
+        if (!ev.candidate) return finish();            // gathering complete
+        const c = ev.candidate.candidate || '';
+        if (c.includes(' typ srflx')) found.srflx = true;
+        if (c.includes(' typ relay')) { found.relay = true; finish(); }
+      };
+      pc.onicegatheringstatechange = () => {
+        if (pc.iceGatheringState === 'complete') finish();
+      };
+      setTimeout(finish, timeoutMs);
+    });
+
+    await pc.setLocalDescription(await pc.createOffer());
+    await settled;
+  } catch (err) {
+    found.error = (err && err.message) || String(err);
+  } finally {
+    if (pc) { try { pc.close(); } catch (_) {} }
+  }
+  return found;
+}
+
+/* Which path did a live connection actually settle on? */
+async function selectedPathKind(pc) {
+  try {
+    const stats = await pc.getStats();
+    let pair = null;
+    stats.forEach((r) => {
+      if (r.type === 'candidate-pair' && r.state === 'succeeded' && (r.nominated || r.selected)) {
+        pair = r;
+      }
+    });
+    if (!pair) return null;
+    const local  = stats.get(pair.localCandidateId);
+    const remote = stats.get(pair.remoteCandidateId);
+    const types = [local && local.candidateType, remote && remote.candidateType];
+    if (types.includes('relay')) return 'relayed via TURN';
+    if (types.includes('srflx') || types.includes('prflx')) return 'direct, through NAT';
+    return 'direct, local network';
+  } catch (_) {
+    return null;
+  }
+}
+
+/* PeerJS creates the RTCPeerConnection lazily, so poll briefly for it. */
+function watchIce(conn, { onFailed, onConnected } = {}) {
+  let tries = 0;
+  const attach = () => {
+    const pc = conn && conn.peerConnection;
+    if (!pc) {
+      if (tries++ < 40) setTimeout(attach, 50);
+      return;
+    }
+    const handler = () => {
+      const state = pc.iceConnectionState;
+      if (state === 'connected' || state === 'completed') {
+        if (onConnected) onConnected(pc);
+      } else if (state === 'failed') {
+        if (onFailed) onFailed(pc);
+      }
+    };
+    pc.addEventListener('iceconnectionstatechange', handler);
+    handler();
+  };
+  attach();
+}
+
+const ICE_FAILURE_HINT =
+  'Could not open a direct path to the other peer (ICE failed). ' +
+  'This network needs a working TURN relay — open “Network” on the ' +
+  'sending page and configure one.';
 
 /* ── Format helpers ─────────────────────────────────────────── */
 function fmtBytes(n) {
@@ -95,6 +325,12 @@ function makeId() {
   const buf = new Uint8Array(8);
   crypto.getRandomValues(buf);
   return Array.from(buf, b => b.toString(16).padStart(2, '0')).join('');
+}
+
+/* The name comes from the remote peer — keep it from escaping into a path. */
+function safeFileName(name) {
+  const base = String(name || 'download.bin').split(/[\\/]/).pop().replace(/^\.+/, '');
+  return base.slice(0, 200) || 'download.bin';
 }
 
 /* ── Screen helpers ─────────────────────────────────────────── */
@@ -154,20 +390,124 @@ async function detectCompression(file) {
   return { compressed: false, kind: 'raw' };
 }
 
-async function gzipBlob(blob) {
-  if (typeof CompressionStream === 'undefined') {
-    throw new Error('CompressionStream is not supported in this browser.');
-  }
-  const cs = new CompressionStream('gzip');
-  return await new Response(blob.stream().pipeThrough(cs)).blob();
+/* ════════════════════════════════════════════════════════════
+   STREAMING PRIMITIVES
+   ════════════════════════════════════════════════════════════ */
+
+/* A WritableStream that accumulates into a Blob without ever holding
+   the whole payload as JS-heap arrays: every BLOB_FOLD_BYTES the
+   buffered views are folded into a Blob part, which the browser is
+   free to back with disk. Heap stays ~BLOB_FOLD_BYTES regardless of
+   total size. */
+function createBlobSink(mime) {
+  const parts = [];
+  let pending = [];
+  let pendingBytes = 0;
+
+  const fold = () => {
+    if (!pending.length) return;
+    parts.push(new Blob(pending));
+    pending = [];
+    pendingBytes = 0;
+  };
+
+  const writable = new WritableStream({
+    write(chunk) {
+      const u8 = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk);
+      pending.push(u8);
+      pendingBytes += u8.byteLength;
+      if (pendingBytes >= BLOB_FOLD_BYTES) fold();
+    },
+    close() { fold(); },
+    abort() { pending = []; pendingBytes = 0; parts.length = 0; },
+  });
+
+  return {
+    kind: 'memory',
+    writable,
+    result() {
+      fold();
+      return new Blob(parts, { type: mime || 'application/octet-stream' });
+    },
+  };
 }
 
-async function gunzipBlob(blob) {
+/* Stream straight to a user-chosen file. Requires a user gesture. */
+async function createFileSink(meta) {
+  const handle = await window.showSaveFilePicker({
+    suggestedName: safeFileName(meta.name),
+  });
+  const writable = await handle.createWritable();
+  return {
+    kind: 'disk',
+    writable,
+    name: handle.name || safeFileName(meta.name),
+    result() { return null; }, // already on disk
+  };
+}
+
+function canSaveToDisk() {
+  return typeof window.showSaveFilePicker === 'function' && window.isSecureContext;
+}
+
+/* Wraps a destination sink, optionally inserting gunzip in front, and
+   exposes a serial write/finish interface. Backpressure propagates
+   through the returned promises. */
+function createInflatePipeline(sink, compressed) {
+  if (!compressed) {
+    const writer = sink.writable.getWriter();
+    return {
+      write: (u8) => writer.write(u8),
+      finish: () => writer.close(),
+      abort: async (err) => { try { await writer.abort(err); } catch (_) {} },
+    };
+  }
+
   if (typeof DecompressionStream === 'undefined') {
     throw new Error('DecompressionStream is not supported in this browser.');
   }
   const ds = new DecompressionStream('gzip');
-  return await new Response(blob.stream().pipeThrough(ds)).blob();
+  const writer = ds.writable.getWriter();
+  const piped = ds.readable.pipeTo(sink.writable);
+  piped.catch(() => {}); // real handling happens in finish()/abort()
+
+  return {
+    write: (u8) => writer.write(u8),
+    finish: async () => { await writer.close(); await piped; },
+    abort: async (err) => {
+      try { await writer.abort(err); } catch (_) {}
+      try { await piped; } catch (_) {}
+    },
+  };
+}
+
+/* Counts bytes flowing through a stream, for progress reporting. */
+function countingTransform(onBytes) {
+  let seen = 0;
+  return new TransformStream({
+    transform(chunk, controller) {
+      seen += chunk.byteLength;
+      onBytes(seen);
+      controller.enqueue(chunk);
+    },
+  });
+}
+
+/* Gzip a Blob without materialising either side in the heap. Returns a
+   (likely disk-backed) Blob, so the compressed size is known up front
+   and the send path can slice it lazily. */
+async function gzipBlobStreaming(blob, onProgress) {
+  if (typeof CompressionStream === 'undefined') {
+    throw new Error('CompressionStream is not supported in this browser.');
+  }
+  const sink = createBlobSink('application/gzip');
+  const source = blob
+    .stream()
+    .pipeThrough(countingTransform(onProgress || (() => {})))
+    .pipeThrough(new CompressionStream('gzip'));
+
+  await source.pipeTo(sink.writable);
+  return sink.result();
 }
 
 /* ════════════════════════════════════════════════════════════
@@ -177,7 +517,7 @@ function startSender() {
   showScreen('share');
   setStatus(shareStatus, 'Connecting to broker…', 'neutral');
 
-  peer = new Peer();
+  peer = new Peer(peerOptions());
 
   peer.on('open', (id) => {
     myPeerId = id;
@@ -188,6 +528,9 @@ function startSender() {
     console.warn('[Peer] error:', err);
     if (err.type === 'network' || err.type === 'server-error' || err.type === 'socket-error') {
       setStatus(shareStatus, 'Network error contacting the broker — check connection.', 'bad');
+    } else if (err.type === 'peer-unavailable') {
+      // A downloader vanished; the room itself is still fine.
+      console.info('[Peer] a downloader went away');
     } else {
       setStatus(shareStatus, 'Peer error: ' + err.type, 'bad');
     }
@@ -196,6 +539,8 @@ function startSender() {
   peer.on('connection', handleIncomingDownloader);
 
   bindShareUi();
+  bindNetworkUi();
+  runIceProbe();
 }
 
 function bindShareUi() {
@@ -232,9 +577,83 @@ function bindShareUi() {
   btnStopAll.addEventListener('click', stopSharing);
 }
 
+/* ── Network panel ──────────────────────────────────────────── */
+function bindNetworkUi() {
+  let stored = null;
+  try { stored = localStorage.getItem(RTC_STORAGE_KEY); } catch (_) {}
+  // Seed the box with the defaults plus a TURN stub to edit in place.
+  netConfig.value = stored || JSON.stringify(
+    { iceServers: [...DEFAULT_ICE_SERVERS, TURN_EXAMPLE] }, null, 2);
+
+  btnNetSave.addEventListener('click', () => {
+    const res = saveRtcConfig(netConfig.value);
+    if (!res.ok) {
+      setStatus(netStatus, res.error, 'bad');
+      return;
+    }
+    setStatus(netStatus,
+      (res.cleared ? 'Cleared — using defaults. ' : 'Saved. ') +
+      'Reload the page to apply to the current room.',
+      'warn');
+  });
+
+  btnNetReset.addEventListener('click', () => {
+    try { localStorage.removeItem(RTC_STORAGE_KEY); } catch (_) {}
+    netConfig.value = JSON.stringify(
+      { iceServers: [...DEFAULT_ICE_SERVERS, TURN_EXAMPLE] }, null, 2);
+    setStatus(netStatus, 'Reset to defaults. Reload the page to apply.', 'warn');
+  });
+
+  btnNetTest.addEventListener('click', () => runIceProbe(true));
+}
+
+async function runIceProbe(manual) {
+  const cfg = loadRtcConfig();
+  setStatus(netStatus, 'Testing STUN/TURN reachability…', 'neutral');
+
+  const res = await probeIce(cfg.iceServers);
+
+  const configuredTurn = JSON.stringify(cfg.iceServers || []).match(/turns?:/) !== null;
+
+  if (res.error) {
+    setStatus(netStatus, 'ICE probe failed: ' + res.error, 'bad');
+  } else if (res.relay) {
+    setStatus(netStatus,
+      'TURN relay reachable — transfers should work even on restrictive networks.',
+      'good');
+  } else if (res.srflx && !configuredTurn) {
+    setStatus(netStatus,
+      'STUN works, no TURN configured. Direct connections succeed on most home ' +
+      'networks but fail behind symmetric NAT (many mobile and corporate ' +
+      'networks). Add a TURN server below to cover those.',
+      'warn');
+  } else if (res.srflx) {
+    setStatus(netStatus,
+      'STUN works, but your configured TURN server did not answer — check the ' +
+      'host, port and credentials below.',
+      'bad');
+  } else {
+    setStatus(netStatus,
+      'No STUN or TURN candidates could be gathered. You may be offline or ' +
+      'behind a firewall that blocks WebRTC entirely.',
+      'bad');
+  }
+
+  if (!manual && !res.relay && !res.error) {
+    console.warn('[ice] no relay candidate — symmetric-NAT peers will fail to connect');
+  }
+}
+
+/* ── Staging ────────────────────────────────────────────────── */
+let stageToken = 0;
+
 async function onFileStaged(file) {
+  const token = ++stageToken;   // guards against an out-of-order detect resolving late
+
   stagedFile = file;
+  stagedDetected = null;
   stageInfo.hidden = false;
+  stageProgress.hidden = true;
   stageName.textContent = file.name;
   stageSize.textContent = fmtBytes(file.size);
   stageBadge.textContent = 'checking…';
@@ -244,6 +663,8 @@ async function onFileStaged(file) {
   stageHint.textContent = 'Detecting file type…';
 
   const detected = await detectCompression(file);
+  if (token !== stageToken) return;   // a newer file was staged meanwhile
+
   stagedDetected = detected;
 
   if (detected.compressed) {
@@ -265,10 +686,13 @@ async function onFileStaged(file) {
 }
 
 function clearStage() {
+  stageToken++;
   stagedFile = null;
   stagedDetected = null;
   filePicker.value = '';
   stageInfo.hidden = true;
+  stageProgress.hidden = true;
+  stageFill.style.width = '0%';
 }
 
 async function shareStagedFile() {
@@ -286,22 +710,36 @@ async function shareStagedFile() {
     if (!ok) return;
   }
 
+  const file = stagedFile;
   btnStage.disabled = true;
   try {
-    let blob = stagedFile;
+    let blob = file;
     let compressed = false;
+
     if (stageCompress.checked) {
       setStatus(shareStatus, 'Compressing…', 'neutral');
-      blob = await gzipBlob(stagedFile);
+      stageProgress.hidden = false;
+      stageFill.style.width = '0%';
+      stageText.textContent = '0%';
+
+      blob = await gzipBlobStreaming(file, (readBytes) => {
+        const pct = file.size ? Math.min(100, (readBytes / file.size) * 100) : 0;
+        stageFill.style.width = pct.toFixed(1) + '%';
+        stageText.textContent =
+          pct.toFixed(1) + '% · ' + fmtBytes(readBytes) + ' / ' + fmtBytes(file.size);
+      });
+
       compressed = true;
+      stageProgress.hidden = true;
     }
+
     const fileId = makeId();
     const meta = {
       id: fileId,
-      name: stagedFile.name,
-      mime: stagedFile.type || 'application/octet-stream',
+      name: safeFileName(file.name),
+      mime: file.type || 'application/octet-stream',
       size: blob.size,
-      originalSize: stagedFile.size,
+      originalSize: file.size,
       compressed,
     };
     addToShared({ meta, blob });
@@ -309,6 +747,7 @@ async function shareStagedFile() {
     clearStage();
   } catch (err) {
     console.error(err);
+    stageProgress.hidden = true;
     setStatus(shareStatus, 'Failed: ' + (err && err.message ? err.message : err), 'bad');
   } finally {
     btnStage.disabled = false;
@@ -451,7 +890,22 @@ window.addEventListener('beforeunload', () => {
 function handleIncomingDownloader(conn) {
   console.log('[Host] incoming downloader from', conn.peer);
   let requestTimer = null;
+  let startTimer = null;
   let entry = null;
+  let streaming = false;
+
+  const clearTimers = () => {
+    if (requestTimer) { clearTimeout(requestTimer); requestTimer = null; }
+    if (startTimer)   { clearTimeout(startTimer);   startTimer = null; }
+  };
+
+  watchIce(conn, {
+    onFailed: () => console.warn('[Host] ICE failed for', conn.peer),
+    onConnected: async (pc) => {
+      const kind = await selectedPathKind(pc);
+      if (kind) console.log('[Host] path to', conn.peer + ':', kind);
+    },
+  });
 
   conn.on('open', () => {
     requestTimer = setTimeout(() => {
@@ -462,10 +916,30 @@ function handleIncomingDownloader(conn) {
     }, 5000);
   });
 
+  const beginStream = async () => {
+    if (streaming || !entry) return;
+    streaming = true;
+    clearTimers();
+    bumpDownloads(entry);
+    try {
+      await sendBlobChunks(conn, entry.blob);
+      if (conn.open) conn.send({ type: 'file-end', id: entry.meta.id, size: entry.meta.size });
+      await drainAndClose(conn);
+    } catch (err) {
+      console.warn('[Host] send failed:', err);
+      try { conn.close(); } catch (_) {}
+    }
+  };
+
   conn.on('data', async (msg) => {
     if (!msg || typeof msg !== 'object') return;
-    if (msg.type !== 'request' || entry) return;
 
+    if (msg.type === 'start') {
+      await beginStream();
+      return;
+    }
+
+    if (msg.type !== 'request' || entry) return;
     if (requestTimer) { clearTimeout(requestTimer); requestTimer = null; }
 
     entry = shared.get(msg.fileId);
@@ -475,44 +949,57 @@ function handleIncomingDownloader(conn) {
       return;
     }
 
-    bumpDownloads(entry);
     try {
       conn.send({ type: 'file-meta', ...entry.meta });
-      await sendBlobChunks(conn, entry.blob);
-      if (conn.open) conn.send({ type: 'file-end', id: entry.meta.id });
-      await drainAndClose(conn);
     } catch (err) {
-      console.warn('[Host] send failed:', err);
-      try { conn.close(); } catch (_) {}
+      console.warn('[Host] could not send meta:', err);
+      return;
+    }
+
+    if (Number(msg.proto) >= 2) {
+      // Receiver will pick a destination (possibly via a save dialog) and
+      // then ask us to start. Give it room, but not forever.
+      startTimer = setTimeout(() => {
+        if (!streaming && conn.open) {
+          try { conn.send({ type: 'reject', reason: 'no-start' }); } catch (_) {}
+          try { conn.close(); } catch (_) {}
+        }
+      }, START_TIMEOUT_MS);
+    } else {
+      await beginStream();   // legacy receiver: stream immediately
     }
   });
 
-  conn.on('close', () => {
-    if (requestTimer) { clearTimeout(requestTimer); requestTimer = null; }
-  });
-  conn.on('error', (e) => console.warn('[Host conn] error:', e));
+  conn.on('close', clearTimers);
+  conn.on('error', (e) => { clearTimers(); console.warn('[Host conn] error:', e); });
 }
 
 async function sendBlobChunks(conn, blob) {
   const total = blob.size;
   let offset = 0;
+  let sinceYield = 0;
   const dc = conn && conn.dataChannel ? conn.dataChannel : null;
   if (dc) { try { dc.bufferedAmountLowThreshold = BUFFER_LOW_WATER; } catch (_) {} }
 
   while (offset < total) {
     if (!conn.open) throw new Error('downloader disconnected');
     const end = Math.min(offset + CHUNK_SIZE, total);
+    // Slicing the Blob reads lazily from wherever the browser stored it,
+    // so only one chunk is in the heap at a time.
     const buf = await blob.slice(offset, end).arrayBuffer();
     conn.send(buf);
     offset = end;
+    sinceYield++;
 
     if (dc && dc.bufferedAmount > BUFFER_HIGH_WATER) {
+      sinceYield = 0;
       await new Promise((resolve) => {
         const handler = () => { dc.removeEventListener('bufferedamountlow', handler); resolve(); };
         dc.addEventListener('bufferedamountlow', handler);
         setTimeout(() => { dc.removeEventListener('bufferedamountlow', handler); resolve(); }, 1000);
       });
-    } else if ((offset / CHUNK_SIZE) % 32 === 0) {
+    } else if (sinceYield >= 32) {
+      sinceYield = 0;
       await new Promise(r => setTimeout(r, 0));
     }
   }
@@ -522,7 +1009,7 @@ async function drainAndClose(conn) {
   const dc = conn && conn.dataChannel ? conn.dataChannel : null;
   if (dc) {
     let waited = 0;
-    while (dc.bufferedAmount > 0 && waited < 5000) {
+    while (dc.bufferedAmount > 0 && waited < 15000) {
       await new Promise(r => setTimeout(r, 50));
       waited += 50;
     }
@@ -537,81 +1024,252 @@ function startReceiver(senderPeerId, fileId) {
   showScreen('receive');
   setStatus(recvStatus, 'Connecting to broker…', 'neutral');
 
-  const recvPeer = new Peer();
+  const recvPeer = new Peer(peerOptions());
   let conn = null;
-  let chunks = [];
-  let received = 0;
   let meta = null;
-  let done = false;
 
+  let pipeline = null;         // set once a destination is chosen
+  let sinkKind = null;         // 'disk' | 'memory'
+  let activeSink = null;
+  let preBuffer = [];          // chunks that arrived before the destination existed
+  let preBufferBytes = 0;
+  let received = 0;            // wire bytes
+  let started = false;
+  let done = false;
+  let failed = false;
+  let objectUrl = null;
+
+  /* Two independent facts share the note line — the ICE path (set whenever
+     the connection settles) and the destination (set at file-meta). Compose
+     them instead of letting whichever fires last win. */
+  let pathNote = '';
+  let destNote = '';
+  const renderNotes = () => {
+    recvPath.textContent = [pathNote, destNote].filter(Boolean).join(' · ');
+  };
+
+  /* PeerJS emits 'data' synchronously; an async handler would interleave
+     and write chunks out of order. Everything funnels through this chain. */
+  let chain = Promise.resolve();
+  const serial = (fn) => {
+    chain = chain.then(fn).catch((err) => {
+      if (failed) return;
+      failed = true;
+      console.error('[Recv] pipeline error:', err);
+      setStatus(recvStatus, 'Transfer failed: ' + (err && err.message ? err.message : err), 'bad');
+      if (pipeline) pipeline.abort(err);
+      try { recvPeer.destroy(); } catch (_) {}
+    });
+    return chain;
+  };
+
+  const cleanupUrl = () => {
+    if (objectUrl) { URL.revokeObjectURL(objectUrl); objectUrl = null; }
+  };
+  window.addEventListener('beforeunload', cleanupUrl);
+
+  /* ── Destination selection ── */
+  async function useDestination(sink) {
+    activeSink = sink;
+    sinkKind = sink.kind;
+    pipeline = createInflatePipeline(sink, !!(meta && meta.compressed));
+
+    // Flush anything that raced ahead of us (legacy sender).
+    const queued = preBuffer;
+    preBuffer = [];
+    preBufferBytes = 0;
+    for (const u8 of queued) await pipeline.write(u8);
+
+    if (!started) {
+      started = true;
+      try { conn.send({ type: 'start' }); } catch (e) { console.warn(e); }
+    }
+    setStatus(recvStatus,
+      sinkKind === 'disk' ? 'Receiving — writing straight to disk…' : 'Receiving…',
+      'neutral');
+    destNote = sinkKind === 'disk'
+      ? 'Streaming to “' + sink.name + '” — memory use stays flat'
+      : 'Buffering in memory';
+    renderNotes();
+  }
+
+  async function chooseDisk() {
+    try {
+      const sink = await createFileSink(meta);
+      recvActions.innerHTML = '';
+      await useDestination(sink);
+    } catch (err) {
+      if (err && err.name === 'AbortError') {
+        setStatus(recvStatus, 'Save cancelled — pick a destination to start the transfer.', 'warn');
+        return;
+      }
+      console.warn('[Recv] save picker failed:', err);
+      setStatus(recvStatus, 'Could not open the save dialog — falling back to memory.', 'warn');
+      recvActions.innerHTML = '';
+      await useDestination(createBlobSink(meta && meta.mime));
+    }
+  }
+
+  async function chooseMemory() {
+    recvActions.innerHTML = '';
+    await useDestination(createBlobSink(meta && meta.mime));
+  }
+
+  function offerDestinationChoice() {
+    recvActions.innerHTML = '';
+
+    const save = document.createElement('button');
+    save.type = 'button';
+    save.className = 'btn btn--primary';
+    save.textContent = 'Save to disk…';
+    save.addEventListener('click', () => serial(chooseDisk));
+
+    const mem = document.createElement('button');
+    mem.type = 'button';
+    mem.className = 'btn btn--ghost';
+    mem.textContent = 'Keep in memory';
+    mem.addEventListener('click', () => serial(chooseMemory));
+
+    recvActions.appendChild(save);
+    recvActions.appendChild(mem);
+
+    setStatus(recvStatus,
+      'Ready. “Save to disk” streams the file straight to storage — the only ' +
+      'option that works for files larger than available memory.',
+      'good');
+    destNote = '“Keep in memory” holds the whole file in the tab until you download it';
+    renderNotes();
+  }
+
+  /* ── Completion ── */
+  async function complete() {
+    if (meta && received !== meta.size) {
+      throw new Error(
+        'Truncated transfer — expected ' + fmtBytes(meta.size) +
+        ' but got ' + fmtBytes(received) + '.'
+      );
+    }
+    if (meta && meta.compressed) setStatus(recvStatus, 'Decompressing…', 'neutral');
+
+    await pipeline.finish();
+    done = true;
+
+    recvFill.style.width = '100%';
+
+    if (sinkKind === 'disk') {
+      recvText.textContent = 'Saved · ' + fmtBytes(received) + ' received';
+      setStatus(recvStatus, 'Done. Saved to “' + activeSink.name + '”.', 'good');
+      recvActions.innerHTML = '';
+    } else {
+      const blob = activeSink.result();
+      recvText.textContent = 'Received · ' + fmtBytes(blob.size);
+      setStatus(recvStatus, 'Done. Tap to download.', 'good');
+      recvActions.innerHTML = '';
+      cleanupUrl();
+      objectUrl = URL.createObjectURL(blob);
+      const dl = document.createElement('a');
+      dl.className = 'btn btn--primary';
+      dl.href = objectUrl;
+      dl.download = safeFileName(meta && meta.name);
+      dl.textContent = 'Download';
+      recvActions.appendChild(dl);
+    }
+
+    try { recvPeer.destroy(); } catch (_) {}
+  }
+
+  /* ── Peer wiring ── */
   recvPeer.on('open', () => {
     setStatus(recvStatus, 'Reaching sender…', 'neutral');
     conn = recvPeer.connect(senderPeerId, { reliable: true });
 
-    conn.on('open', () => {
-      setStatus(recvStatus, 'Requesting file…', 'neutral');
-      try { conn.send({ type: 'request', fileId }); } catch (e) { console.warn(e); }
+    watchIce(conn, {
+      onFailed: () => {
+        if (done) return;
+        failed = true;
+        setStatus(recvStatus, ICE_FAILURE_HINT, 'bad');
+      },
+      onConnected: async (pc) => {
+        const kind = await selectedPathKind(pc);
+        if (kind && !done) { pathNote = 'Connection: ' + kind; renderNotes(); }
+      },
     });
 
-    conn.on('data', async (msg) => {
+    conn.on('open', () => {
+      setStatus(recvStatus, 'Requesting file…', 'neutral');
+      try { conn.send({ type: 'request', fileId, proto: PROTO }); } catch (e) { console.warn(e); }
+    });
+
+    conn.on('data', (msg) => {
+      /* Binary: a file chunk. */
+      let u8 = null;
       if (msg instanceof ArrayBuffer) {
-        chunks.push(msg);
-        received += msg.byteLength;
+        u8 = new Uint8Array(msg);
+      } else if (ArrayBuffer.isView(msg)) {
+        u8 = new Uint8Array(msg.buffer.slice(msg.byteOffset, msg.byteOffset + msg.byteLength));
+      }
+
+      if (u8) {
+        received += u8.byteLength;
         updateRecvProgress(received, meta && meta.size);
+        serial(async () => {
+          if (pipeline) return pipeline.write(u8);
+          // Legacy sender streaming before we picked a destination.
+          preBufferBytes += u8.byteLength;
+          if (preBufferBytes > PREBUFFER_MAX) {
+            throw new Error('Sender started streaming before a destination was chosen.');
+          }
+          preBuffer.push(u8);
+        });
         return;
       }
-      if (ArrayBuffer.isView(msg)) {
-        const buf = msg.buffer.slice(msg.byteOffset, msg.byteOffset + msg.byteLength);
-        chunks.push(buf);
-        received += buf.byteLength;
-        updateRecvProgress(received, meta && meta.size);
-        return;
-      }
+
       if (!msg || typeof msg !== 'object') return;
 
       if (msg.type === 'reject') {
         const reason = ({
           'not-found':  'This share link no longer exists. The sender may have removed the file or left the room.',
           'no-request': 'Sender timed out waiting for our request.',
+          'no-start':   'Sender timed out waiting for us to choose a save location.',
         })[msg.reason] || ('Rejected: ' + msg.reason);
         setStatus(recvStatus, reason, 'bad');
+        failed = true;
         try { recvPeer.destroy(); } catch (_) {}
         return;
       }
+
       if (msg.type === 'file-meta') {
         meta = msg;
         recvInfo.hidden = false;
-        recvName.textContent = meta.name;
+        recvName.textContent = safeFileName(meta.name);
         recvSize.textContent = fmtBytes(meta.originalSize || meta.size);
         recvBadge.textContent = meta.compressed
           ? 'gzipped on the wire (' + fmtBytes(meta.size) + ')'
           : 'raw';
         recvBadge.className = 'badge ' + (meta.compressed ? 'badge--compressed' : 'badge--raw');
-        setStatus(recvStatus, 'Receiving…', 'neutral');
+
+        if (canSaveToDisk()) {
+          // showSaveFilePicker needs a user gesture, so ask before starting.
+          offerDestinationChoice();
+        } else {
+          destNote = 'This browser cannot stream to disk (no File System Access ' +
+                     'API), so the file is held in memory until you download it';
+          renderNotes();
+          serial(chooseMemory);
+        }
         return;
       }
+
       if (msg.type === 'file-end') {
-        done = true;
-        try {
-          let blob = new Blob(chunks, { type: (meta && meta.mime) || 'application/octet-stream' });
-          chunks = [];
-          if (meta && meta.compressed) {
-            setStatus(recvStatus, 'Decompressing…', 'neutral');
-            blob = await gunzipBlob(blob);
-          }
-          finalizeRecv(blob);
-        } catch (e) {
-          console.error(e);
-          setStatus(recvStatus, 'Failed: ' + (e && e.message ? e.message : e), 'bad');
-        } finally {
-          try { recvPeer.destroy(); } catch (_) {}
-        }
+        serial(complete);
       }
     });
 
     conn.on('close', () => {
-      if (!done) {
+      if (!done && !failed) {
+        failed = true;
         setStatus(recvStatus, 'Sender closed the connection before transfer finished.', 'bad');
+        if (pipeline) pipeline.abort(new Error('connection closed'));
       }
     });
     conn.on('error', (e) => {
@@ -621,19 +1279,24 @@ function startReceiver(senderPeerId, fileId) {
 
   recvPeer.on('error', (err) => {
     console.warn('[Recv peer] error:', err);
+    if (done) return;
     if (err.type === 'peer-unavailable') {
       setStatus(recvStatus,
         'Sender is offline. The link has expired (the sender closed the page or stopped sharing).',
         'bad');
     } else if (err.type === 'network' || err.type === 'server-error' || err.type === 'socket-error') {
       setStatus(recvStatus, 'Network error contacting the broker — check connection.', 'bad');
-    } else if (!done) {
+    } else {
       setStatus(recvStatus, 'Peer error: ' + err.type, 'bad');
     }
   });
 
   btnRecvCancel.addEventListener('click', () => {
+    if (done) return;
+    failed = true;
     try { recvPeer.destroy(); } catch (_) {}
+    if (pipeline) pipeline.abort(new Error('cancelled'));
+    cleanupUrl();
     setStatus(recvStatus, 'Cancelled.', 'warn');
     recvActions.innerHTML = '';
   });
@@ -648,20 +1311,6 @@ function updateRecvProgress(received, total) {
   recvFill.style.width = pct.toFixed(1) + '%';
   recvText.textContent =
     pct.toFixed(1) + '% · ' + fmtBytes(received) + ' / ' + fmtBytes(total);
-}
-
-function finalizeRecv(blob) {
-  setStatus(recvStatus, 'Done. Tap to download.', 'good');
-  recvFill.style.width = '100%';
-  recvText.textContent = 'Received · ' + fmtBytes(blob.size);
-
-  recvActions.innerHTML = '';
-  const dl = document.createElement('a');
-  dl.className = 'btn btn--primary';
-  dl.href = URL.createObjectURL(blob);
-  dl.download = recvName.textContent || 'download.bin';
-  dl.textContent = 'Download';
-  recvActions.appendChild(dl);
 }
 
 /* ════════════════════════════════════════════════════════════
