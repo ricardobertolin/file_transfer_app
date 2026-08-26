@@ -115,7 +115,10 @@ const START_TIMEOUT_MS  = 5 * 60 * 1000;   // receiver has this long to pick a s
 /* ── Sender state ───────────────────────────────────────────── */
 let peer = null;
 let myPeerId = null;
-const shared = new Map(); // fileId → { meta, blob, downloads, itemEl, dlCountEl }
+// fileId → { meta, blob, downloads, inFlight, itemEl, dlCountEl }
+// `downloads` counts transfers that actually finished; `inFlight` counts the
+// ones still streaming, so an aborted download never leaves a false "delivered".
+const shared = new Map();
 
 let stagedFile = null;
 let stagedDetected = null;
@@ -763,11 +766,13 @@ function makeShareLink(fileId) {
 function addToShared({ meta, blob }) {
   const link = makeShareLink(meta.id);
   const els = renderSharedItem(meta, link);
-  shared.set(meta.id, {
-    meta, blob, downloads: 0,
+  const entry = {
+    meta, blob, downloads: 0, inFlight: 0,
     itemEl: els.root,
     dlCountEl: els.downloads,
-  });
+  };
+  shared.set(meta.id, entry);
+  renderDownloadState(entry);
   sharedEmpty.hidden = true;
 }
 
@@ -795,7 +800,8 @@ function renderSharedItem(meta, link) {
     : 'raw';
   const downloads = document.createElement('span');
   downloads.className = 'recv-item__downloads';
-  downloads.textContent = 'downloads: 0';
+  downloads.textContent = 'not downloaded yet';
+  downloads.setAttribute('aria-live', 'polite');
   row2.appendChild(badge);
   row2.appendChild(downloads);
 
@@ -859,9 +865,45 @@ function removeShared(fileId) {
   if (shared.size === 0) sharedEmpty.hidden = false;
 }
 
-function bumpDownloads(entry) {
-  entry.downloads++;
-  if (entry.dlCountEl) entry.dlCountEl.textContent = 'downloads: ' + entry.downloads;
+/* Paint the "has anyone actually taken this?" state onto a shared item.
+   A plain `downloads: 0 → 1` counter was too easy to miss, so a delivered
+   file also gets a stamped counter and a coloured rail down its left edge. */
+function renderDownloadState(entry) {
+  const el = entry.dlCountEl;
+  const done = entry.downloads;
+  if (el) {
+    const parts = [];
+    if (done > 0) parts.push('✓ downloaded ' + done + '×');
+    else if (!entry.inFlight) parts.push('not downloaded yet');
+    if (entry.inFlight) parts.push('sending…');
+    el.textContent = parts.join(' · ');
+  }
+  const root = entry.itemEl;
+  if (root && root.classList) {
+    root.classList.toggle('recv-item--claimed', done > 0);
+    root.classList.toggle('recv-item--sending', entry.inFlight > 0);
+  }
+}
+
+function markSending(entry) {
+  entry.inFlight++;
+  renderDownloadState(entry);
+}
+
+function markSendFinished(entry, delivered) {
+  entry.inFlight = Math.max(0, entry.inFlight - 1);
+  if (delivered) entry.downloads++;
+  renderDownloadState(entry);
+  if (!delivered || !entry.itemEl || !entry.itemEl.classList) return;
+  // One-shot flash so a completed pickup is noticeable while you watch.
+  entry.itemEl.classList.remove('recv-item--just-hit');
+  void (entry.itemEl.offsetWidth);            // restart the animation
+  entry.itemEl.classList.add('recv-item--just-hit');
+  setTimeout(() => {
+    if (entry.itemEl && entry.itemEl.classList) {
+      entry.itemEl.classList.remove('recv-item--just-hit');
+    }
+  }, 1200);
 }
 
 function stopSharing() {
@@ -920,13 +962,15 @@ function handleIncomingDownloader(conn) {
     if (streaming || !entry) return;
     streaming = true;
     clearTimers();
-    bumpDownloads(entry);
+    markSending(entry);
     try {
       await sendBlobChunks(conn, entry.blob);
       if (conn.open) conn.send({ type: 'file-end', id: entry.meta.id, size: entry.meta.size });
       await drainAndClose(conn);
+      markSendFinished(entry, true);
     } catch (err) {
       console.warn('[Host] send failed:', err);
+      markSendFinished(entry, false);
       try { conn.close(); } catch (_) {}
     }
   };

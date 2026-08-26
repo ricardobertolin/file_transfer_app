@@ -339,8 +339,11 @@ a { color: var(--link); }
 }
 
 .recv-item {
-  padding: 6px 0;
+  padding: 6px 0 6px 8px;
   border-top: 1px dotted var(--border-d);
+  /* Transparent rail is always present so the item does not jump sideways
+     the moment it turns "delivered". */
+  border-left: 3px solid transparent;
 }
 .recv-item:first-child { border-top: none; }
 
@@ -367,9 +370,48 @@ a { color: var(--link); }
 }
 
 .recv-item__downloads {
+  flex: 0 0 auto;
   font-family: var(--font-mono);
   font-size: 0.78rem;
   color: var(--muted);
+  border: 1px solid transparent;
+  padding: 0 4px;
+  white-space: nowrap;
+}
+
+/* ── Pickup state ───────────────────────────────────────────
+   Whether anyone has actually taken a file is the thing a sender wants
+   to see at a glance, so it is carried by three cues at once: the rail,
+   the stamped counter, and a one-shot flash when it lands. */
+.recv-item--sending {
+  border-left-color: var(--warn);
+}
+.recv-item--sending .recv-item__downloads {
+  color: var(--warn);
+  border-color: var(--warn);
+}
+
+.recv-item--claimed {
+  border-left-color: var(--good);
+  background: #f4f9ec;
+}
+.recv-item--claimed .recv-item__downloads {
+  color: #fff;
+  background: var(--good);
+  border-color: var(--good);
+  font-weight: bold;
+}
+/* An in-flight second pickup outranks the delivered stamp. */
+.recv-item--claimed.recv-item--sending { border-left-color: var(--warn); }
+
+@keyframes recv-item-hit {
+  0%   { background: #cfe8b0; }
+  100% { background: #f4f9ec; }
+}
+.recv-item--just-hit { animation: recv-item-hit 1.2s ease-out; }
+
+@media (prefers-reduced-motion: reduce) {
+  .recv-item--just-hit { animation: none; }
 }
 
 .recv-item__actions { justify-content: flex-end; gap: 6px; margin-top: 2px; margin-bottom: 0; }

@@ -21,8 +21,10 @@
     <path d="M105 38 H134 L156 60 V116 H105 Z"/>
   </g>
 
-  <!-- Folded corner of the page, carved back out in parchment -->
-  <path d="M134 38 L156 60 H134 Z" fill="#f5ecd9"/>
-  <path d="M134 38 L156 60 H134 Z" fill="none" stroke="#8b0000" stroke-width="6"
-        stroke-linejoin="round"/>
+  <!-- Dog-ear. Drawn as a parchment hairline *inside* the page, freeing the
+       fold triangle from the body. Both ends land exactly on the page
+       outline, so nothing crosses the silhouette — an outline stroked on
+       the edge itself would spill half its width past it. -->
+  <path d="M134 38 V60 H156" fill="none" stroke="#f5ecd9" stroke-width="5"
+        stroke-linejoin="round" stroke-linecap="butt"/>
 </svg>

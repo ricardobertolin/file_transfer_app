@@ -17,12 +17,13 @@
     <!-- Fore sail (jib) -->
     <path d="M25 17 V38 H12 Z"/>
 
-    <!-- Main sail as a document page with a cut corner -->
-    <path d="M36 12 H46 L54 20 V38 H36 Z"/>
+    <!-- Main sail as a document page with a cut corner. The corner is cut
+         deeper than on icon.svg so the fold still registers at 16×16. -->
+    <path d="M36 12 H44 L54 22 V38 H36 Z"/>
   </g>
 
-  <!-- Folded corner, carved out in parchment -->
-  <path d="M46 12 L54 20 H46 Z" fill="#f5ecd9"/>
-  <path d="M46 12 L54 20 H46 Z" fill="none" stroke="#8b0000" stroke-width="2.5"
-        stroke-linejoin="round"/>
+  <!-- Dog-ear: a parchment hairline inside the page, ends landing on the
+       outline so the fold never spills past the sail's silhouette. -->
+  <path d="M44 12 V22 H54" fill="none" stroke="#f5ecd9" stroke-width="2.5"
+        stroke-linejoin="round" stroke-linecap="butt"/>
 </svg>
