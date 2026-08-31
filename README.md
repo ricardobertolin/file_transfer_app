@@ -9,6 +9,10 @@ Each shared file gets its own link. Links live only as long as the sending tab:
 close it, or hit *Stop sharing*, and every outstanding link stops working
 immediately.
 
+The **QR** button next to a link draws it as a QR code, for handing a share
+straight to a phone. It is encoded in the page (`qr.js`, no dependency), so the
+link is never sent to an image service.
+
 ## How it works
 
 A public [PeerJS](https://peerjs.com) broker is used for signalling only — just

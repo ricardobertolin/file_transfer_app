@@ -444,6 +444,50 @@ a { color: var(--link); }
 }
 .recv-item__remove:hover { background: #d8c89a; color: var(--bad); }
 
+/* ── Share QR ───────────────────────────────────────────────
+   Handing a link to the phone next to you. Kept behind a small
+   toggle so the shared list stays a list of links. */
+.recv-item__qr {
+  padding: 2px 10px;
+  background: #e8dcbc;
+  color: var(--text);
+  border: 1px solid var(--border-d);
+  border-radius: 0;
+  font-family: var(--font-body);
+  font-size: 0.85rem;
+  font-weight: normal;
+  cursor: pointer;
+}
+.recv-item__qr:hover { background: #d8c89a; }
+.recv-item__qr[aria-expanded="true"] {
+  background: #d8c89a;
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.qr-panel {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dotted var(--border-d);
+  text-align: center;
+}
+
+.qr-panel__img {
+  display: block;
+  width: 160px;
+  max-width: 100%;
+  margin: 0 auto;
+  border: 1px solid var(--border);
+  background: #fff;
+}
+
+.qr-panel__caption {
+  margin-top: 4px;
+  font-size: 0.78rem;
+  font-style: italic;
+  color: var(--muted);
+}
+
 .share-link {
   display: block;
   width: 100%;

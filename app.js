@@ -827,16 +827,58 @@ function renderSharedItem(meta, link) {
   removeBtn.textContent = 'Remove';
   removeBtn.addEventListener('click', () => removeShared(meta.id));
 
+  /* Folded away by default: copying the link is still the main move,
+     the QR is for the phone standing next to the laptop. */
+  const qrPanel = document.createElement('div');
+  qrPanel.className = 'qr-panel';
+  qrPanel.hidden = true;
+
+  const qrBtn = document.createElement('button');
+  qrBtn.type = 'button';
+  qrBtn.className = 'recv-item__qr';
+  qrBtn.textContent = 'QR';
+  qrBtn.title = 'Show this link as a QR code';
+  qrBtn.setAttribute('aria-expanded', 'false');
+  qrBtn.addEventListener('click', () => toggleQr(qrBtn, qrPanel, link));
+
   actions.appendChild(removeBtn);
+  actions.appendChild(qrBtn);
   actions.appendChild(copyBtn);
 
   root.appendChild(row1);
   root.appendChild(row2);
   root.appendChild(linkInput);
   root.appendChild(actions);
+  root.appendChild(qrPanel);
   sharedList.appendChild(root);
 
   return { root, downloads };
+}
+
+/* Drawn on first reveal only — most links get copied, never scanned. */
+function toggleQr(btn, panel, link) {
+  const show = panel.hidden;
+
+  if (show && !panel.dataset.drawn) {
+    panel.dataset.drawn = '1';
+    const caption = document.createElement('p');
+    caption.className = 'qr-panel__caption';
+    try {
+      const img = document.createElement('img');
+      img.className = 'qr-panel__img';
+      img.alt = 'QR code for this share link';
+      img.src = QR.toDataUrl(link);
+      panel.appendChild(img);
+      caption.textContent = 'Scan with the receiving device';
+    } catch (err) {
+      console.error(err);
+      caption.textContent = 'This link is too long to draw as a QR code.';
+    }
+    panel.appendChild(caption);
+  }
+
+  panel.hidden = !show;
+  btn.setAttribute('aria-expanded', String(show));
 }
 
 function copyLink(link, btn) {
